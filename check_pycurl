@@ -26,6 +26,8 @@ class CheckPyCurlOptions(object):
         self.proxy = None
         self.postdata = None
         self.failaterror = True
+	self.userpwd = None
+	self.verbose=False
 
 
 class CheckPyCurlMulti(object):
@@ -104,11 +106,15 @@ class CheckPyCurl(object):
         c.setopt(c.TIMEOUT, self.options.timeout)
         c.setopt(c.FOLLOWLOCATION, self.options.location)
         c.setopt(c.SSL_VERIFYPEER, self.options.insecure)
+	if self.options.verbose:
+            c.setopt(c.VERBOSE, self.options.verbose)
         if getattr(self.options, 'cookiejar', False):
             c.setopt(pycurl.COOKIEJAR, self.options.tmpfile)
             c.setopt(pycurl.COOKIEFILE, self.options.tmpfile)
         if self.options.proxy is not None:
             c.setopt(c.PROXY, self.options.proxy)
+        if self.options.userpwd is not None:
+            c.setopt(c.USERPWD, self.options.userpwd)
         # if a POST, set up options
         if getattr(self.options, 'postdata', None) is not None:
             post_params = []
@@ -167,6 +173,10 @@ class CheckPyCurl(object):
         buf.close()
 
         self.results['totaltime'] = c.getinfo(pycurl.TOTAL_TIME)
+        self.results['starttime'] = c.getinfo(pycurl.STARTTRANSFER_TIME)
+        #self.results['size_download'] = c.getinfo(pycurl.SIZE_DOWNLOAD_T)
+        self.results['speed_download'] = c.getinfo(pycurl.SPEED_DOWNLOAD)
+        #self.results['speed_upload'] = c.getinfo(pycurl.SPEED_UPLOAD_T)
         return self.results['rc']
 
 def checkargs(options):
@@ -193,6 +203,11 @@ def get_cli_options():
                       dest="location", action="store_true", default=False)
     parser.add_option("--insecure", dest="insecure", action="store_true",
                       default=False)
+    parser.add_option("-s", "--speed", dest="speed", action="store_true", help="add download transfer speed in kB/s to performance data")
+    parser.add_option("--speedwarn", dest="speedwarn", help="transfer speed limit warn limit in kB/s")
+    parser.add_option("--speedcrit", dest="speedcrit", help="transfer speed limit critical limit in kB/s")
+    parser.add_option("--userpwd", dest="userpwd", help="username:password")
+    parser.add_option("-v", "--verbose", action="store_true", dest="verbose")
     return parser
 
 def main():
@@ -204,8 +219,19 @@ def main():
         if options.url is not None:
             cpc = CheckPyCurl(options)
             rc = cpc.curl()
-            rcstr = 'OK:' if rc == 0 else 'CRITICAL:'
-            rcstr = rcstr + ' ' + cpc.results['status'] + " | request_time=" + str(cpc.results['totaltime'])
+            if rc == 0:
+                rcstr = 'OK:'
+		speed_dl = cpc.results['speed_download']/1000
+                if options.speedwarn is not None:
+                    if (cpc.results['speed_download']/1000) <= options.speedwarn:
+                        rcstr = 'WARNING:'
+                    if (cpc.results['speed_download']/1000) <= options.speedcrit:
+                        rcstr = 'CRITICAL:'
+            else:
+                rcstr = 'CRITICAL:'
+            rcstr = rcstr + ' ' + cpc.results['status'] + " | request_time=" + str(cpc.results['totaltime']) + "s"
+            if options.speed:
+                rcstr = rcstr + ' ' + "speed_download_perSec=" + str(cpc.results['speed_download']/1000) + "kB"
         else:
             # runfile
             a = CheckPyCurlMulti(options.runfile)
