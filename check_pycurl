@@ -26,8 +26,11 @@ class CheckPyCurlOptions(object):
         self.proxy = None
         self.postdata = None
         self.failaterror = True
-	self.userpwd = None
-	self.verbose=False
+        self.userpwd = None
+        self.speed = None
+        self.speedwarn = None
+        self.speedcrit = None
+        self.verbose=False
 
 
 class CheckPyCurlMulti(object):
@@ -74,19 +77,22 @@ class CheckPyCurlMulti(object):
         cpc = None
         search_results = {}
         total_req_time = 0
+        overall_rc = 0
         for (counter, checkobj) in enumerate(self.checkobjs):
             cpc = CheckPyCurl(options=checkobj, prev_matches=search_results)
             rc = cpc.curl()
             cpc.results['stage'] = counter
+            overall_rc=max([overall_rc, cpc.results['rc']]) # remember overall return code
             total_req_time += cpc.results['totaltime'] # store running total of req time
             cpc.results['totaltime'] = total_req_time
-            if rc != 0 and checkobj.failaterror:
+            if rc == 2 and checkobj.failaterror:
                 self.rm_tmpfile()
                 return cpc
             # store regex match results for later use if available
             if cpc.results.get('search_res', None) is not None:
                 search_results[counter] = cpc.results['search_res']
         self.rm_tmpfile()
+        cpc.results['rc'] = overall_rc
         return cpc
 
 class CheckPyCurl(object):
@@ -106,7 +112,7 @@ class CheckPyCurl(object):
         c.setopt(c.TIMEOUT, self.options.timeout)
         c.setopt(c.FOLLOWLOCATION, self.options.location)
         c.setopt(c.SSL_VERIFYPEER, self.options.insecure)
-	if self.options.verbose:
+        if self.options.verbose:
             c.setopt(c.VERBOSE, self.options.verbose)
         if getattr(self.options, 'cookiejar', False):
             c.setopt(pycurl.COOKIEJAR, self.options.tmpfile)
@@ -152,6 +158,8 @@ class CheckPyCurl(object):
             if self.successtest == 'code':
                 if int(self.successcheck) != int(c.getinfo(pycurl.HTTP_CODE)):
                     self.results['rc'] = 2
+                    self.results['status'] = 'HTTP_CODE is %s but should be %s' % \
+                                         (int(c.getinfo(pycurl.HTTP_CODE)), self.options.test)
             elif self.successtest == 'regex':
                 search_res = re.search(self.successcheck, self.content, re.MULTILINE)
                 if  search_res is not None:
@@ -177,6 +185,19 @@ class CheckPyCurl(object):
         #self.results['size_download'] = c.getinfo(pycurl.SIZE_DOWNLOAD_T)
         self.results['speed_download'] = c.getinfo(pycurl.SPEED_DOWNLOAD)
         #self.results['speed_upload'] = c.getinfo(pycurl.SPEED_UPLOAD_T)
+
+        # evaluate download speed 
+        if self.options.speed and self.results['rc'] != 2:
+            speed_dl = self.results['speed_download']/1000 # in kB / s
+            if self.options.speedwarn is not None:
+                if speed_dl <= self.options.speedwarn:
+                    self.results['rc'] = 1
+                    self.results['status'] = "download speed is lower than warning limit of %s" % (self.options.speedwarn)
+            if self.options.speedcrit is not None:
+                if speed_dl <= self.options.speedcrit:
+                    self.results['rc'] = 2
+                    self.results['status'] = "download speed lower than critical limit of %s" % (self.options.speedcrit)
+
         return self.results['rc']
 
 def checkargs(options):
@@ -195,17 +216,20 @@ def get_cli_options():
     parser.add_option("--test", dest="test",
                       default="code:200", help="[code:HTTPCODE|regex:REGEX]")
     parser.add_option("--connect-timeout", dest="connecttimeout",
-                      default=5)
+                      type="int", default=5)
     parser.add_option("--timeout", dest="timeout",
-                      default=10)
+                      type="int", default=10)
     parser.add_option("--proxy", dest="proxy")
     parser.add_option("--location", help="Follow redirects",
                       dest="location", action="store_true", default=False)
     parser.add_option("--insecure", dest="insecure", action="store_true",
                       default=False)
-    parser.add_option("-s", "--speed", dest="speed", action="store_true", help="add download transfer speed in kB/s to performance data")
-    parser.add_option("--speedwarn", dest="speedwarn", help="transfer speed limit warn limit in kB/s")
-    parser.add_option("--speedcrit", dest="speedcrit", help="transfer speed limit critical limit in kB/s")
+    parser.add_option("-s", "--speed", dest="speed", action="store_true",
+                      help="Add download transfer speed in kB/s to performance data. Only works with last check when using yaml runfile")
+    parser.add_option("--speedwarn", dest="speedwarn", type="int",
+                      help="Transfer speed limit warn limit in kB/s (requires --speed parameter)")
+    parser.add_option("--speedcrit", dest="speedcrit", type="int", 
+                      help="Transfer speed limit critical limit in kB/s (requires --speed parameter)")
     parser.add_option("--userpwd", dest="userpwd", help="username:password")
     parser.add_option("-v", "--verbose", action="store_true", dest="verbose")
     return parser
@@ -215,23 +239,17 @@ def main():
     (options, args) = parser.parse_args()
     (rc, rcstr) = checkargs(options)
 
-    if rc != 3:
+    if rc != 3: # check if url or runfile exists
         if options.url is not None:
             cpc = CheckPyCurl(options)
             rc = cpc.curl()
             if rc == 0:
                 rcstr = 'OK:'
-		speed_dl = cpc.results['speed_download']/1000
-                if options.speedwarn is not None:
-                    if (cpc.results['speed_download']/1000) <= options.speedwarn:
-                        rcstr = 'WARNING:'
-                    if (cpc.results['speed_download']/1000) <= options.speedcrit:
-                        rcstr = 'CRITICAL:'
+            elif rc == 1:
+                rcstr = 'WARNING:'
             else:
                 rcstr = 'CRITICAL:'
-            rcstr = rcstr + ' ' + cpc.results['status'] + " | request_time=" + str(cpc.results['totaltime']) + "s"
-            if options.speed:
-                rcstr = rcstr + ' ' + "speed_download_perSec=" + str(cpc.results['speed_download']/1000) + "kB"
+            rcstr += ' ' + cpc.results['status'] 
         else:
             # runfile
             a = CheckPyCurlMulti(options.runfile)
@@ -240,10 +258,21 @@ def main():
             rc = cpc.results['rc']
             if rc == 0:
                 rcstr = 'OK: All stages passed (%s/%s)' % (len(a.checkobjs), len(a.checkobjs))
+            elif rc == 1:
+                rcstr = 'WARNING: At least one stage raised a warning - last status: %s' % \
+                (cpc.results['status'])
             else:
-                rcstr = 'CRITICAL: Stage %s - %s (should be %s)' % \
-                (cpc.results['stage'], cpc.results['status'], cpc.options.test)
-            rcstr += " | request_time=" + str(cpc.results['totaltime'])
+                rcstr = 'CRITICAL: Stage %s - %s' % \
+                (cpc.results['stage'], cpc.results['status'])
+
+        # append performance parameters
+        rcstr += " | request_time=" + str(cpc.results['totaltime']) + "s"
+
+        # append download speed if wanted
+        if cpc.options.speed:
+            speed_dl = cpc.results['speed_download']/1000
+            rcstr += ' speed_download_perSec={0}kB;{1};{2}'.format( \
+                       cpc.results['speed_download']/1000, cpc.options.speedwarn or '', cpc.options.speedcrit or '')
     print rcstr
     sys.exit(rc)
 
